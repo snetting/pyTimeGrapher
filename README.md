@@ -1,6 +1,6 @@
-# OpenTimegrapher ⏱️
+# pyTimegrapher ⏱️
 
-**OpenTimegrapher** is a Python-based acoustic analysis tool designed to act as a software timegrapher for regulating mechanical watches and pendulum clocks. It serves as a free, open-source alternative to dedicated hardware (like the Weishi No. 1000 or Witschi Watch Expert), using your computer's microphone or a contact piezo sensor to measure the heartbeat of a movement.
+**pyTimegrapher** is a Python-based acoustic analysis tool designed to act as a software timegrapher for regulating mechanical watches and pendulum clocks. It serves as a free, open-source alternative to dedicated hardware (like the Weishi No. 1000 or Witschi Watch Expert), using your computer's microphone or a contact piezo sensor to measure the heartbeat of a movement.
 
 ## 🚀 Key Features
 
