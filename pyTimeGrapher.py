@@ -136,6 +136,7 @@ class WatchAnalyzer:
                     self.results_queue.put(("TICK", None))
                     
                     current_time = global_idx / SAMPLE_RATE
+                    should_update_anchor = True # Default: update the clock anchor
                     
                     if self.last_tick_time > 0:
                         delta = current_time - self.last_tick_time
@@ -146,13 +147,18 @@ class WatchAnalyzer:
                         
                         self.results_queue.put(("LOG", f"Δ: {delta*1000:.0f}ms -> {status}"))
 
-                        if status == "OK":
+                        if status == "NOISE":
+                            # KEY FIX: If it's noise, ignore it completely. 
+                            # Don't update the stopwatch anchor.
+                            should_update_anchor = False
+                        elif status == "OK":
                             self.intervals.append(delta)
                             self.session_intervals.append(delta)
                             if len(self.intervals) > 10: self.intervals.pop(0)
                             self._analyze_intervals()
-                    
-                    self.last_tick_time = current_time
+                    # Only update the "last tick" time if it was a valid tick (or the very first one)
+                    if should_update_anchor:
+                        self.last_tick_time = current_time
 
             self.total_processed_samples += len(raw_data)
             
@@ -273,7 +279,7 @@ class App(tk.Tk):
         
         self.thresh_var = tk.DoubleVar(value=40.0)
         ttk.Label(control_frame, text="Threshold:").pack(side=tk.LEFT)
-        ttk.Scale(control_frame, from_=5.0, to=95.0, variable=self.thresh_var, command=self._set_thresh).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        ttk.Scale(control_frame, from_=1.0, to=95.0, variable=self.thresh_var, command=self._set_thresh).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         self.lbl_thresh = ttk.Label(control_frame, text="40%")
         self.lbl_thresh.pack(side=tk.LEFT)
         self.lbl_agc = ttk.Label(control_frame, text="AGC: --", foreground="blue")
