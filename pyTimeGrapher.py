@@ -216,6 +216,11 @@ class App(tk.Tk):
         self.analyzer = WatchAnalyzer()
         self.device_map = self.analyzer.get_input_devices()
         self.tick_timer = None # For LED flash
+        
+        # NEW VARIABLES for 60s test
+        self.test_timer = None 
+        self.latest_stats = None 
+        
         self._build_ui()
         self.update_loop()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -234,6 +239,10 @@ class App(tk.Tk):
         toolbar.pack(fill=tk.X)
         
         ttk.Button(toolbar, text="Start/Stop", command=self.toggle_listen).pack(side=tk.LEFT, padx=5)
+        
+        # NEW BUTTON
+        ttk.Button(toolbar, text="60s Test", command=self.start_60s_test).pack(side=tk.LEFT, padx=5)
+        
         ttk.Button(toolbar, text="Reset", command=self.analyzer.reset_data).pack(side=tk.LEFT, padx=5)
         
         self.device_var = tk.StringVar()
@@ -308,6 +317,8 @@ class App(tk.Tk):
         self.log_box.tag_config("NOISE", foreground="red")
         self.log_box.tag_config("MISSED", foreground="orange")
         self.log_box.tag_config("INFO", foreground="black")
+        # NEW TAG for final output
+        self.log_box.tag_config("FINAL", foreground="blue", font=("Consolas", 9, "bold"))
 
     def _set_thresh(self, v):
         self.analyzer.threshold_percent = float(v)
@@ -319,6 +330,46 @@ class App(tk.Tk):
             self.analyzer.start_stream(idx)
         else:
             self.analyzer.stop_stream()
+            # If manually stopped during a 60s test, cancel the timer
+            if self.test_timer:
+                self.after_cancel(self.test_timer)
+                self.test_timer = None
+                self.log_msg("--- 60s Test Cancelled ---")
+
+    # NEW METHODS for 60s test
+    def start_60s_test(self):
+        if self.test_timer:
+            self.after_cancel(self.test_timer)
+            self.test_timer = None
+            
+        self.latest_stats = None # Reset captured stats
+        
+        if not self.analyzer.running:
+            idx = self.device_map.get(self.device_var.get())
+            self.analyzer.start_stream(idx)
+        else:
+            self.analyzer.reset_data()
+            
+        self.log_msg("--- Starting 60s Test ---")
+        # Schedule the stop in 60,000 milliseconds
+        self.test_timer = self.after(60000, self.finish_60s_test)
+
+    def finish_60s_test(self):
+        self.test_timer = None
+        if self.analyzer.running:
+            self.analyzer.stop_stream() # Freezes measurement
+            
+        self.log_box.config(state='normal')
+        self.log_box.insert(tk.END, "--- 60s Test Complete ---\n", "FINAL")
+        if self.latest_stats:
+            self.log_box.insert(tk.END, f"FINAL BPH: {self.latest_stats['bph']}\n", "FINAL")
+            self.log_box.insert(tk.END, f"FINAL RATE: {self.latest_stats['rate_session']:+.1f} s/d\n", "FINAL")
+            self.log_box.insert(tk.END, f"FINAL BEAT ERROR: {self.latest_stats['be']:.1f} ms\n", "FINAL")
+        else:
+            self.log_box.insert(tk.END, "No valid stats collected.\n", "FINAL")
+        
+        self.log_box.see(tk.END)
+        self.log_box.config(state='disabled')
 
     def log_msg(self, msg):
         self.log_box.config(state='normal')
@@ -360,6 +411,8 @@ class App(tk.Tk):
                     self.lbl_session.config(text="---")
                     
                 elif tag == "STATS":
+                    self.latest_stats = data # NEW: Capture the latest stats for the 60s test summary
+                    
                     self.lbl_instant.config(text=f"{data['rate_instant']:+.0f} s/d")
                     self.lbl_session.config(text=f"{data['rate_session']:+.1f} s/d")
                     self.lbl_be.config(text=f"{data['be']:.1f} ms")
@@ -376,6 +429,8 @@ class App(tk.Tk):
 
     def _on_close(self):
         self.analyzer.stop_stream()
+        if self.test_timer:
+            self.after_cancel(self.test_timer)
         self.destroy()
 
 if __name__ == "__main__":
