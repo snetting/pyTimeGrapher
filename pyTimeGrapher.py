@@ -30,6 +30,9 @@ class WatchAnalyzer:
         # AGC Variables
         self.agc_gain = 50.0
         self.target_peak = 20000.0 
+        self.use_agc = True
+        self.manual_gain = 50.0
+        self.max_gain = 300.0
         
         # Detection Variables
         self.threshold_percent = 40.0
@@ -109,11 +112,15 @@ class WatchAnalyzer:
             except queue.Empty: continue
 
             # 1. AGC
-            chunk_max = np.max(np.abs(raw_data))
-            if chunk_max > 0:
-                instant_gain = self.target_peak / chunk_max
-                self.agc_gain = (self.agc_gain * 0.98) + (instant_gain * 0.02)
-                self.agc_gain = max(1.0, min(self.agc_gain, 300.0))
+            if self.use_agc:
+                chunk_max = np.max(np.abs(raw_data))
+                if chunk_max > 0:
+                    instant_gain = self.target_peak / chunk_max
+                    # Faster AGC: changed 0.98/0.02 to 0.80/0.20
+                    self.agc_gain = (self.agc_gain * 0.8) + (instant_gain * 0.2)
+                    self.agc_gain = max(1.0, min(self.agc_gain, self.max_gain))
+            else:
+                self.agc_gain = self.manual_gain
 
             # 2. Filter & Smooth
             amplified = raw_data.astype(np.float32) * self.agc_gain
@@ -220,6 +227,7 @@ class App(tk.Tk):
         # NEW VARIABLES for 60s test
         self.test_timer = None 
         self.latest_stats = None 
+        self.current_agc = 50.0
         
         self._build_ui()
         self.update_loop()
@@ -291,7 +299,25 @@ class App(tk.Tk):
         ttk.Scale(control_frame, from_=1.0, to=95.0, variable=self.thresh_var, command=self._set_thresh).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         self.lbl_thresh = ttk.Label(control_frame, text="40%")
         self.lbl_thresh.pack(side=tk.LEFT)
-        self.lbl_agc = ttk.Label(control_frame, text="AGC: --", foreground="blue")
+
+        gain_frame = ttk.Frame(left_frame, padding=10)
+        gain_frame.pack(fill=tk.X)
+        
+        self.agc_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(gain_frame, text="Auto AGC", variable=self.agc_var, command=self._set_agc_mode).pack(side=tk.LEFT)
+        
+        ttk.Label(gain_frame, text="Input:").pack(side=tk.LEFT, padx=(15, 5))
+        self.input_type_var = tk.StringVar(value="Standard Mic")
+        self.input_combo = ttk.Combobox(gain_frame, textvariable=self.input_type_var, values=["Standard Mic", "Inductive / Low Signal"], state="readonly", width=18)
+        self.input_combo.pack(side=tk.LEFT)
+        self.input_combo.bind("<<ComboboxSelected>>", self._on_input_type_change)
+
+        ttk.Label(gain_frame, text="Manual Gain:").pack(side=tk.LEFT, padx=(15, 5))
+        self.gain_var = tk.DoubleVar(value=50.0)
+        self.gain_scale = ttk.Scale(gain_frame, from_=1.0, to=300.0, variable=self.gain_var, command=self._set_gain)
+        self.gain_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        
+        self.lbl_agc = ttk.Label(gain_frame, text="AGC: 50.0x", foreground="blue")
         self.lbl_agc.pack(side=tk.RIGHT, padx=10)
 
         # --- Plot ---
@@ -323,6 +349,25 @@ class App(tk.Tk):
     def _set_thresh(self, v):
         self.analyzer.threshold_percent = float(v)
         self.lbl_thresh.config(text=f"{int(float(v))}%")
+
+    def _set_agc_mode(self):
+        self.analyzer.use_agc = self.agc_var.get()
+        if not self.analyzer.use_agc:
+            # Sync slider to current AGC value when switching to manual
+            self.gain_var.set(self.current_agc)
+            self.analyzer.manual_gain = self.current_agc
+
+    def _set_gain(self, v):
+        self.gain_var.set(float(v))
+        self.analyzer.manual_gain = float(v)
+
+    def _on_input_type_change(self, event=None):
+        if self.input_type_var.get() == "Standard Mic":
+            self.analyzer.max_gain = 300.0
+            self.gain_scale.config(to=300.0)
+        else:
+            self.analyzer.max_gain = 5000.0
+            self.gain_scale.config(to=5000.0)
 
     def toggle_listen(self):
         if not self.analyzer.running:
@@ -397,6 +442,7 @@ class App(tk.Tk):
                 
                 elif tag == "WAVEFORM":
                     buf, thresh, agc = data
+                    self.current_agc = agc
                     self.line.set_data(np.arange(len(buf)), buf)
                     self.tline.set_data([0, len(buf)], [thresh, thresh])
                     self.ax.set_xlim(0, len(buf))
