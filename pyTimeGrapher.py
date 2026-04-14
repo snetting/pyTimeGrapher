@@ -404,7 +404,7 @@ class App(tk.Tk):
     def show_about(self):
         about_win = tk.Toplevel(self)
         about_win.title("About pyTimeGrapher")
-        about_win.geometry("500x350")
+        about_win.geometry("500x400")
         about_win.resizable(False, False)
         about_win.transient(self)
         about_win.grab_set()
@@ -437,9 +437,10 @@ class App(tk.Tk):
 
         ttk.Button(link_frame, text="Close", command=about_win.destroy).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(content, text=coffee_url, foreground="blue", cursor="hand2").pack(pady=5)
-        # Make the text link also clickable
-        about_win.bind("<Button-1>", lambda e: webbrowser.open(coffee_url) if e.widget.cget("text") == coffee_url else None)
+        lbl_link = ttk.Label(content, text=coffee_url, foreground="blue", cursor="hand2")
+        lbl_link.pack(pady=5)
+        # Bind the click event directly to the label widget to avoid errors
+        lbl_link.bind("<Button-1>", lambda e: webbrowser.open(coffee_url))
 
     def toggle_listen(self):
         if not self.analyzer.running:
