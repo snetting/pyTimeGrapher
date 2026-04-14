@@ -6,6 +6,7 @@ import scipy.signal as signal
 import threading
 import queue
 import time
+import webbrowser
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from collections import deque
@@ -264,6 +265,8 @@ class App(tk.Tk):
         
         ttk.Button(toolbar, text="Reset", command=self.analyzer.reset_data).pack(side=tk.LEFT, padx=5)
         
+        ttk.Button(toolbar, text="About", command=self.show_about).pack(side=tk.LEFT, padx=5)
+        
         self.device_var = tk.StringVar()
         c = ttk.Combobox(toolbar, textvariable=self.device_var, values=list(self.device_map.keys()), state="readonly", width=25)
         if self.device_map: c.current(0)
@@ -397,6 +400,46 @@ class App(tk.Tk):
         else:
             self.analyzer.max_gain = 5000.0
             self.gain_scale.config(to=5000.0)
+
+    def show_about(self):
+        about_win = tk.Toplevel(self)
+        about_win.title("About pyTimeGrapher")
+        about_win.geometry("500x350")
+        about_win.resizable(False, False)
+        about_win.transient(self)
+        about_win.grab_set()
+
+        content = ttk.Frame(about_win, padding=20)
+        content.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(content, text="pyTimeGrapher", font=("Arial", 16, "bold")).pack(pady=(0, 10))
+        ttk.Label(content, text="Author: Steve Netting", font=("Arial", 11, "bold")).pack()
+        
+        info_text = (
+            "\nThis software was developed and continues to be enhanced to meet "
+            "my personal requirements for watch timing and analysis.\n\n"
+            "pyTimeGrapher is 'coffee-ware'. If you find this tool useful and "
+            "would like to support its development, please consider buying "
+            "the author a coffee!"
+        )
+        
+        lbl_info = ttk.Label(content, text=info_text, wraplength=450, justify=tk.CENTER)
+        lbl_info.pack(pady=10)
+
+        link_frame = ttk.Frame(content)
+        link_frame.pack(pady=10)
+
+        coffee_url = "https://buymeacoffee.com/OH3SPN"
+        
+        btn_coffee = ttk.Button(link_frame, text="☕ Buy the author a coffee", 
+                                command=lambda: webbrowser.open(coffee_url))
+        btn_coffee.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(link_frame, text="Close", command=about_win.destroy).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(content, text=coffee_url, foreground="blue", cursor="hand2").pack(pady=5)
+        # Make the text link also clickable
+        about_win.bind("<Button-1>", lambda e: webbrowser.open(coffee_url) if e.widget.cget("text") == coffee_url else None)
 
     def toggle_listen(self):
         if not self.analyzer.running:
