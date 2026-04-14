@@ -12,7 +12,11 @@
     * **Dead Time Lockout:** Automatically ignores "ringing" and echoes (80ms lockout) to prevent double-triggering on loud movements.
     * **Auto-Gain Control (AGC):** Dynamically adjusts microphone sensitivity to keep the signal lock steady.
 * **Beat Error Measurement:** Calculates the milliseconds of error between the "tick" and the "tock" (pallet fork centering).
-* **Visual Feedback:** Real-time waveform scope, simulated LED beat indicator, and optional audio click.
+* **Advanced Visual Feedback:** 
+    * **Waveform Scope:** Real-time visualization of the acoustic signal.
+    * **Beat Error Trend Graph:** A scrolling 60-second graph showing individual beat deviations and a moving average line for visual rate trend analysis.
+    * **LED Indicator:** Simulated LED beat indicator and optional audio click.
+* **About & Support:** Built-in "About" window with author information and a way to support the project.
 
 ## 🛠️ Installation
 
@@ -34,25 +38,26 @@ sudo apt-get install python3-pyaudio portaudio19-dev
 While a standard microphone works for loud clocks, **mechanical wristwatches require a contact microphone** for accurate results due to their low acoustic energy.
 
 1.  **Best:** A generic "Clip-on Guitar Pickup" or Piezo disc taped to the watch case.
-2.  **Good:** A high-quality lapel mic clipped directly to the crown.
+2.  **Good:** A high-quality lapel mic clipped directly to the crown, or an **Inductive Coupler** (as used with analog telephones) which can sometimes pick up the electromagnetic pulse of certain movements.
 3.  **Okay:** A standard webcam mic (works only for loud pocket watches or pendulum clocks).
 
 ## 📖 How to Use
 
 1.  **Launch the App:**
     ```bash
-    python timegrapher.py
+    python pyTimeGrapher.py
     ```
 2.  **Select Input:** Choose your microphone from the dropdown list.
 3.  **Start Listening:** Click **Start/Stop**.
 4.  **Calibration:**
-    * Watch the **Waveform** graph. You want clear, distinct spikes.
+    * Watch the **Input Level** waveform graph. You want clear, distinct spikes.
     * Adjust the **Threshold** slider until the red line sits just above the background noise but below the main spikes.
     * The **LED** in the top right should flash steadily with every tick.
 5.  **Read the Stats:**
     * Wait about 30-60 seconds for the **Session Average** to stabilize.
     * **Rate:** How many seconds per day the watch is gaining (+) or losing (-).
     * **Beat Error (B.E.):** The timing difference between the "tick" and "tock." A reading of 0.0ms is perfect; anything under 2.0ms is acceptable.
+    * **Trend Graph:** Observe the blue dots (individual beats) and the red line (moving average) to see how the watch is performing over time.
 
 ## 🧮 How It Works
 
