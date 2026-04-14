@@ -6,6 +6,7 @@ import scipy.signal as signal
 import threading
 import queue
 import time
+import webbrowser
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from collections import deque
@@ -201,18 +202,28 @@ class WatchAnalyzer:
         
         # Beat Error
         be_ms = 0.0
+        instant_be_ms = 0.0
+        
+        # Calculate instant deviation for the plot
+        # This shows both Rate Error (drift) and Beat Error (alternation)
+        instant_be_ms = (valid_data[-1] - target_interval) * 1000
+
         if len(valid_data) >= 4:
             recent_clean = valid_data[-20:]
             evens, odds = recent_clean[0::2], recent_clean[1::2]
             if len(odds) > 0 and len(evens) > 0:
                 be_ms = abs(np.mean(evens) - np.mean(odds)) * 1000
             
+        current_time = self.total_processed_samples / SAMPLE_RATE
+            
         self.results_queue.put(("STATS", {
             "bph": target_bph, 
             "rate_instant": rate_instant, 
             "rate_session": rate_session,
             "be": be_ms,
-            "count": len(valid_data)
+            "count": len(valid_data),
+            "time": current_time,
+            "instant_be": instant_be_ms
         }))
 
 class App(tk.Tk):
@@ -228,6 +239,7 @@ class App(tk.Tk):
         self.test_timer = None 
         self.latest_stats = None 
         self.current_agc = 50.0
+        self.be_history = [] # To store (time, instant_be, avg_be)
         
         self._build_ui()
         self.update_loop()
@@ -252,6 +264,8 @@ class App(tk.Tk):
         ttk.Button(toolbar, text="60s Test", command=self.start_60s_test).pack(side=tk.LEFT, padx=5)
         
         ttk.Button(toolbar, text="Reset", command=self.analyzer.reset_data).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(toolbar, text="About", command=self.show_about).pack(side=tk.LEFT, padx=5)
         
         self.device_var = tk.StringVar()
         c = ttk.Combobox(toolbar, textvariable=self.device_var, values=list(self.device_map.keys()), state="readonly", width=25)
@@ -321,15 +335,33 @@ class App(tk.Tk):
         self.lbl_agc.pack(side=tk.RIGHT, padx=10)
 
         # --- Plot ---
-        self.fig = Figure(figsize=(5, 4), dpi=100)
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_facecolor('#f5f5f5')
-        self.ax.set_ylim(0, 35000)
-        self.ax.get_xaxis().set_visible(False)
-        self.ax.get_yaxis().set_visible(False)
+        self.fig = Figure(figsize=(5, 6), dpi=100)
+        self.gs = self.fig.add_gridspec(2, 1, height_ratios=[1, 4], hspace=0.3)
         
-        self.line, = self.ax.plot([], [], color='#228B22', lw=1)
-        self.tline, = self.ax.plot([], [], color='red', ls='--', alpha=0.6, lw=1)
+        # 1. Waveform Plot
+        self.ax_wave = self.fig.add_subplot(self.gs[0, 0])
+        self.ax_wave.set_facecolor('#f5f5f5')
+        self.ax_wave.set_ylim(0, 35000)
+        self.ax_wave.get_xaxis().set_visible(False)
+        self.ax_wave.get_yaxis().set_visible(False)
+        self.ax_wave.set_title("Input Level", fontsize=8)
+        
+        self.line, = self.ax_wave.plot([], [], color='#228B22', lw=1)
+        self.tline, = self.ax_wave.plot([], [], color='red', ls='--', alpha=0.6, lw=1)
+        
+        # 2. Beat Error Plot
+        self.ax_be = self.fig.add_subplot(self.gs[1, 0])
+        self.ax_be.set_facecolor('#f5f5f5')
+        self.ax_be.set_title("Beat Error +/- around centre (ms)", fontsize=10)
+        self.ax_be.set_xlabel("ms", fontsize=8)
+        self.ax_be.set_ylabel("Elapsed Time (s)", fontsize=8)
+        self.ax_be.set_xlim(-2, 2)
+        self.ax_be.set_ylim(60, 0) # 0 at top, 60 at bottom
+        self.ax_be.axvline(0, color='black', alpha=0.2, ls='-')
+        
+        self.be_dots, = self.ax_be.plot([], [], 'o', color='#007acc', markersize=2, alpha=0.5)
+        # Moving average line (shows Rate trend)
+        self.be_line_avg, = self.ax_be.plot([], [], color='red', lw=1.5, alpha=0.8)
         
         self.canvas = FigureCanvasTkAgg(self.fig, left_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -368,6 +400,47 @@ class App(tk.Tk):
         else:
             self.analyzer.max_gain = 5000.0
             self.gain_scale.config(to=5000.0)
+
+    def show_about(self):
+        about_win = tk.Toplevel(self)
+        about_win.title("About pyTimeGrapher")
+        about_win.geometry("500x400")
+        about_win.resizable(False, False)
+        about_win.transient(self)
+        about_win.grab_set()
+
+        content = ttk.Frame(about_win, padding=20)
+        content.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(content, text="pyTimeGrapher", font=("Arial", 16, "bold")).pack(pady=(0, 10))
+        ttk.Label(content, text="Author: Steve Netting", font=("Arial", 11, "bold")).pack()
+        
+        info_text = (
+            "\nThis software was developed and continues to be enhanced to meet "
+            "my personal requirements for watch timing and analysis.\n\n"
+            "pyTimeGrapher is 'coffee-ware'. If you find this tool useful and "
+            "would like to support its development, please consider buying "
+            "the author a coffee!"
+        )
+        
+        lbl_info = ttk.Label(content, text=info_text, wraplength=450, justify=tk.CENTER)
+        lbl_info.pack(pady=10)
+
+        link_frame = ttk.Frame(content)
+        link_frame.pack(pady=10)
+
+        coffee_url = "https://buymeacoffee.com/OH3SPN"
+        
+        btn_coffee = ttk.Button(link_frame, text="☕ Buy the author a coffee", 
+                                command=lambda: webbrowser.open(coffee_url))
+        btn_coffee.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(link_frame, text="Close", command=about_win.destroy).pack(side=tk.LEFT, padx=5)
+
+        lbl_link = ttk.Label(content, text=coffee_url, foreground="blue", cursor="hand2")
+        lbl_link.pack(pady=5)
+        # Bind the click event directly to the label widget to avoid errors
+        lbl_link.bind("<Button-1>", lambda e: webbrowser.open(coffee_url))
 
     def toggle_listen(self):
         if not self.analyzer.running:
@@ -445,7 +518,7 @@ class App(tk.Tk):
                     self.current_agc = agc
                     self.line.set_data(np.arange(len(buf)), buf)
                     self.tline.set_data([0, len(buf)], [thresh, thresh])
-                    self.ax.set_xlim(0, len(buf))
+                    self.ax_wave.set_xlim(0, len(buf))
                     self.lbl_agc.config(text=f"AGC: {agc:.1f}x")
                     self.canvas.draw_idle()
                     
@@ -455,9 +528,17 @@ class App(tk.Tk):
                 elif tag == "RESET":
                     self.lbl_instant.config(text="---")
                     self.lbl_session.config(text="---")
+                    self.lbl_be.config(text="---")
+                    self.lbl_bph.config(text="BPH: ---")
+                    self.lbl_conf.config(text="Confidence: 0 samples")
+                    self.be_history = []
+                    self.be_dots.set_data([], [])
+                    self.be_line_avg.set_data([], [])
+                    self.ax_be.set_xlim(-2, 2)
+                    self.ax_be.set_ylim(60, 0)
                     
                 elif tag == "STATS":
-                    self.latest_stats = data # NEW: Capture the latest stats for the 60s test summary
+                    self.latest_stats = data 
                     
                     self.lbl_instant.config(text=f"{data['rate_instant']:+.0f} s/d")
                     self.lbl_session.config(text=f"{data['rate_session']:+.1f} s/d")
@@ -469,6 +550,48 @@ class App(tk.Tk):
                     if n < 10: conf_text += " (Low)"
                     elif n > 60: conf_text += " (High)"
                     self.lbl_conf.config(text=conf_text)
+                    
+                    # Update Beat Error Plot
+                    t = data.get('time', 0)
+                    be_instant = data.get('instant_be', 0)
+                    
+                    self.be_history.append((t, be_instant))
+                    
+                    # Keep only last 60 seconds for scrolling/display
+                    while self.be_history and self.be_history[0][0] < t - 60:
+                        self.be_history.pop(0)
+                    
+                    if self.be_history:
+                        h_times = [p[0] for p in self.be_history]
+                        h_instant = [p[1] for p in self.be_history]
+                        
+                        # Calculate moving average of the instant deviations (Rate Trend)
+                        h_avg = []
+                        window = 10
+                        for i in range(len(h_instant)):
+                            start = max(0, i - window + 1)
+                            h_avg.append(np.mean(h_instant[start:i+1]))
+                        
+                        self.be_dots.set_data(h_instant, h_times)
+                        self.be_line_avg.set_data(h_avg, h_times)
+                        
+                        # Real-time X-axis resizing
+                        max_abs = max(max([abs(x) for x in h_instant]), 1.0)
+                        curr_left, curr_right = self.ax_be.get_xlim()
+                        target_limit = max_abs * 1.2
+                        if target_limit > curr_right:
+                            self.ax_be.set_xlim(-target_limit, target_limit)
+                        
+                        # Y-axis window
+                        if self.test_timer:
+                            # During 60s test, show full 60s window (0 to 60)
+                            self.ax_be.set_ylim(60, 0)
+                        else:
+                            # During assessment, show rolling 60s window
+                            if t < 60:
+                                self.ax_be.set_ylim(60, 0)
+                            else:
+                                self.ax_be.set_ylim(t, t - 60)
                     
         except queue.Empty: pass
         self.after(50, self.update_loop)
