@@ -1,6 +1,6 @@
-# pyTimegrapher ⏱️
+# pyTimeGrapher ⏱️
 
-**pyTimegrapher** is a Python-based acoustic analysis tool designed to act as a software timegrapher for regulating mechanical watches and pendulum clocks. It serves as a free, open-source alternative to dedicated hardware (like the Weishi No. 1000 or Witschi Watch Expert), using your computer's microphone or a contact piezo sensor to measure the heartbeat of a movement.
+**pyTimeGrapher** is a Python-based acoustic analysis tool designed to act as a software timegrapher for regulating mechanical watches and pendulum clocks. It serves as a free, open-source alternative to dedicated hardware (like the Weishi No. 1000 or Witschi Watch Expert), using your computer's microphone or a contact piezo sensor to measure the heartbeat of a movement.
 
 ## 🚀 Key Features
 
@@ -61,7 +61,7 @@ While a standard microphone works for loud clocks, **mechanical wristwatches req
 
 ## 🧮 How It Works
 
-OpenTimegrapher uses a digital signal processing (DSP) pipeline:
+pyTimeGrapher uses a digital signal processing (DSP) pipeline:
 
 1.  **Bandpass Filter:** Isolates frequencies between 2kHz and 10kHz (the "snap" of the pallet fork).
 2.  **Envelope & Smoothing:** Converts the raw audio spikes into a smooth "hill" for detection.
