@@ -204,12 +204,8 @@ class WatchAnalyzer:
         instant_be_ms = 0.0
         
         # Calculate instant deviation for the plot
-        if len(valid_data) >= 2:
-            # We use (d_i - d_{i-1}) / 2 as the deviation from average
-            instant_be_ms = (valid_data[-1] - valid_data[-2]) * 1000 / 2.0
-            # Alternate sign based on parity to keep even/odd beats on separate sides
-            if len(valid_data) % 2 == 0:
-                instant_be_ms = -instant_be_ms
+        # This shows both Rate Error (drift) and Beat Error (alternation)
+        instant_be_ms = (valid_data[-1] - target_interval) * 1000
 
         if len(valid_data) >= 4:
             recent_clean = valid_data[-20:]
@@ -361,9 +357,8 @@ class App(tk.Tk):
         self.ax_be.axvline(0, color='black', alpha=0.2, ls='-')
         
         self.be_dots, = self.ax_be.plot([], [], 'o', color='#007acc', markersize=2, alpha=0.5)
-        # Moving average lines
-        self.be_line_p, = self.ax_be.plot([], [], color='red', lw=1.5, alpha=0.8)
-        self.be_line_n, = self.ax_be.plot([], [], color='red', lw=1.5, alpha=0.8)
+        # Moving average line (shows Rate trend)
+        self.be_line_avg, = self.ax_be.plot([], [], color='red', lw=1.5, alpha=0.8)
         
         self.canvas = FigureCanvasTkAgg(self.fig, left_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -494,8 +489,7 @@ class App(tk.Tk):
                     self.lbl_conf.config(text="Confidence: 0 samples")
                     self.be_history = []
                     self.be_dots.set_data([], [])
-                    self.be_line_p.set_data([], [])
-                    self.be_line_n.set_data([], [])
+                    self.be_line_avg.set_data([], [])
                     self.ax_be.set_xlim(-2, 2)
                     self.ax_be.set_ylim(60, 0)
                     
@@ -516,9 +510,8 @@ class App(tk.Tk):
                     # Update Beat Error Plot
                     t = data.get('time', 0)
                     be_instant = data.get('instant_be', 0)
-                    be_avg = data.get('be', 0)
                     
-                    self.be_history.append((t, be_instant, be_avg))
+                    self.be_history.append((t, be_instant))
                     
                     # Keep only last 60 seconds for scrolling/display
                     while self.be_history and self.be_history[0][0] < t - 60:
@@ -527,12 +520,16 @@ class App(tk.Tk):
                     if self.be_history:
                         h_times = [p[0] for p in self.be_history]
                         h_instant = [p[1] for p in self.be_history]
-                        h_avg_p = [p[2]/2.0 for p in self.be_history]
-                        h_avg_n = [-p[2]/2.0 for p in self.be_history]
+                        
+                        # Calculate moving average of the instant deviations (Rate Trend)
+                        h_avg = []
+                        window = 10
+                        for i in range(len(h_instant)):
+                            start = max(0, i - window + 1)
+                            h_avg.append(np.mean(h_instant[start:i+1]))
                         
                         self.be_dots.set_data(h_instant, h_times)
-                        self.be_line_p.set_data(h_avg_p, h_times)
-                        self.be_line_n.set_data(h_avg_n, h_times)
+                        self.be_line_avg.set_data(h_avg, h_times)
                         
                         # Real-time X-axis resizing
                         max_abs = max(max([abs(x) for x in h_instant]), 1.0)
