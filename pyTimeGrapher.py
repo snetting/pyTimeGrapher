@@ -201,18 +201,32 @@ class WatchAnalyzer:
         
         # Beat Error
         be_ms = 0.0
+        instant_be_ms = 0.0
+        
+        # Calculate instant deviation for the plot
+        if len(valid_data) >= 2:
+            # We use (d_i - d_{i-1}) / 2 as the deviation from average
+            instant_be_ms = (valid_data[-1] - valid_data[-2]) * 1000 / 2.0
+            # Alternate sign based on parity to keep even/odd beats on separate sides
+            if len(valid_data) % 2 == 0:
+                instant_be_ms = -instant_be_ms
+
         if len(valid_data) >= 4:
             recent_clean = valid_data[-20:]
             evens, odds = recent_clean[0::2], recent_clean[1::2]
             if len(odds) > 0 and len(evens) > 0:
                 be_ms = abs(np.mean(evens) - np.mean(odds)) * 1000
             
+        current_time = self.total_processed_samples / SAMPLE_RATE
+            
         self.results_queue.put(("STATS", {
             "bph": target_bph, 
             "rate_instant": rate_instant, 
             "rate_session": rate_session,
             "be": be_ms,
-            "count": len(valid_data)
+            "count": len(valid_data),
+            "time": current_time,
+            "instant_be": instant_be_ms
         }))
 
 class App(tk.Tk):
@@ -228,6 +242,7 @@ class App(tk.Tk):
         self.test_timer = None 
         self.latest_stats = None 
         self.current_agc = 50.0
+        self.be_history = [] # To store (time, instant_be, avg_be)
         
         self._build_ui()
         self.update_loop()
@@ -321,15 +336,34 @@ class App(tk.Tk):
         self.lbl_agc.pack(side=tk.RIGHT, padx=10)
 
         # --- Plot ---
-        self.fig = Figure(figsize=(5, 4), dpi=100)
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_facecolor('#f5f5f5')
-        self.ax.set_ylim(0, 35000)
-        self.ax.get_xaxis().set_visible(False)
-        self.ax.get_yaxis().set_visible(False)
+        self.fig = Figure(figsize=(5, 6), dpi=100)
+        self.gs = self.fig.add_gridspec(2, 1, height_ratios=[1, 4], hspace=0.3)
         
-        self.line, = self.ax.plot([], [], color='#228B22', lw=1)
-        self.tline, = self.ax.plot([], [], color='red', ls='--', alpha=0.6, lw=1)
+        # 1. Waveform Plot
+        self.ax_wave = self.fig.add_subplot(self.gs[0, 0])
+        self.ax_wave.set_facecolor('#f5f5f5')
+        self.ax_wave.set_ylim(0, 35000)
+        self.ax_wave.get_xaxis().set_visible(False)
+        self.ax_wave.get_yaxis().set_visible(False)
+        self.ax_wave.set_title("Input Level", fontsize=8)
+        
+        self.line, = self.ax_wave.plot([], [], color='#228B22', lw=1)
+        self.tline, = self.ax_wave.plot([], [], color='red', ls='--', alpha=0.6, lw=1)
+        
+        # 2. Beat Error Plot
+        self.ax_be = self.fig.add_subplot(self.gs[1, 0])
+        self.ax_be.set_facecolor('#f5f5f5')
+        self.ax_be.set_title("Beat Error +/- around centre (ms)", fontsize=10)
+        self.ax_be.set_xlabel("ms", fontsize=8)
+        self.ax_be.set_ylabel("Elapsed Time (s)", fontsize=8)
+        self.ax_be.set_xlim(-2, 2)
+        self.ax_be.set_ylim(60, 0) # 0 at top, 60 at bottom
+        self.ax_be.axvline(0, color='black', alpha=0.2, ls='-')
+        
+        self.be_dots, = self.ax_be.plot([], [], 'o', color='#007acc', markersize=2, alpha=0.5)
+        # Moving average lines
+        self.be_line_p, = self.ax_be.plot([], [], color='red', lw=1.5, alpha=0.8)
+        self.be_line_n, = self.ax_be.plot([], [], color='red', lw=1.5, alpha=0.8)
         
         self.canvas = FigureCanvasTkAgg(self.fig, left_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -445,7 +479,7 @@ class App(tk.Tk):
                     self.current_agc = agc
                     self.line.set_data(np.arange(len(buf)), buf)
                     self.tline.set_data([0, len(buf)], [thresh, thresh])
-                    self.ax.set_xlim(0, len(buf))
+                    self.ax_wave.set_xlim(0, len(buf))
                     self.lbl_agc.config(text=f"AGC: {agc:.1f}x")
                     self.canvas.draw_idle()
                     
@@ -455,9 +489,18 @@ class App(tk.Tk):
                 elif tag == "RESET":
                     self.lbl_instant.config(text="---")
                     self.lbl_session.config(text="---")
+                    self.lbl_be.config(text="---")
+                    self.lbl_bph.config(text="BPH: ---")
+                    self.lbl_conf.config(text="Confidence: 0 samples")
+                    self.be_history = []
+                    self.be_dots.set_data([], [])
+                    self.be_line_p.set_data([], [])
+                    self.be_line_n.set_data([], [])
+                    self.ax_be.set_xlim(-2, 2)
+                    self.ax_be.set_ylim(60, 0)
                     
                 elif tag == "STATS":
-                    self.latest_stats = data # NEW: Capture the latest stats for the 60s test summary
+                    self.latest_stats = data 
                     
                     self.lbl_instant.config(text=f"{data['rate_instant']:+.0f} s/d")
                     self.lbl_session.config(text=f"{data['rate_session']:+.1f} s/d")
@@ -469,6 +512,45 @@ class App(tk.Tk):
                     if n < 10: conf_text += " (Low)"
                     elif n > 60: conf_text += " (High)"
                     self.lbl_conf.config(text=conf_text)
+                    
+                    # Update Beat Error Plot
+                    t = data.get('time', 0)
+                    be_instant = data.get('instant_be', 0)
+                    be_avg = data.get('be', 0)
+                    
+                    self.be_history.append((t, be_instant, be_avg))
+                    
+                    # Keep only last 60 seconds for scrolling/display
+                    while self.be_history and self.be_history[0][0] < t - 60:
+                        self.be_history.pop(0)
+                    
+                    if self.be_history:
+                        h_times = [p[0] for p in self.be_history]
+                        h_instant = [p[1] for p in self.be_history]
+                        h_avg_p = [p[2]/2.0 for p in self.be_history]
+                        h_avg_n = [-p[2]/2.0 for p in self.be_history]
+                        
+                        self.be_dots.set_data(h_instant, h_times)
+                        self.be_line_p.set_data(h_avg_p, h_times)
+                        self.be_line_n.set_data(h_avg_n, h_times)
+                        
+                        # Real-time X-axis resizing
+                        max_abs = max(max([abs(x) for x in h_instant]), 1.0)
+                        curr_left, curr_right = self.ax_be.get_xlim()
+                        target_limit = max_abs * 1.2
+                        if target_limit > curr_right:
+                            self.ax_be.set_xlim(-target_limit, target_limit)
+                        
+                        # Y-axis window
+                        if self.test_timer:
+                            # During 60s test, show full 60s window (0 to 60)
+                            self.ax_be.set_ylim(60, 0)
+                        else:
+                            # During assessment, show rolling 60s window
+                            if t < 60:
+                                self.ax_be.set_ylim(60, 0)
+                            else:
+                                self.ax_be.set_ylim(t, t - 60)
                     
         except queue.Empty: pass
         self.after(50, self.update_loop)
