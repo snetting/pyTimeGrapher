@@ -30,12 +30,16 @@ class WatchAnalyzer:
         
         # AGC Variables
         self.agc_gain = 50.0
-        self.target_peak = 20000.0 
+        self.peak_hold = 0.0
+        self.target_peak = 28000.0 
         self.use_agc = True
         self.manual_gain = 50.0
-        self.max_gain = 300.0
+        self.max_gain = 500.0
         
         # Detection Variables
+        self.auto_threshold = False
+        self.smoothed_peak = 0.0
+        self.noise_floor = 0.0
         self.threshold_percent = 40.0
         self.last_trigger_index = -999999
         self.total_processed_samples = 0
@@ -56,6 +60,9 @@ class WatchAnalyzer:
         self.intervals = []
         self.session_intervals = []
         self.agc_gain = 50.0
+        self.peak_hold = 0.0
+        self.smoothed_peak = 0.0
+        self.noise_floor = 0.0
         self.total_processed_samples = 0
         self.last_trigger_index = -999999
         self.results_queue.put(("RESET", None))
@@ -75,6 +82,11 @@ class WatchAnalyzer:
         if self.running: return
         self.reset_data()
         self.running = True
+        
+        # Start AGC at the current manual slider position
+        self.agc_gain = self.manual_gain
+        self.peak_hold = self.target_peak / self.manual_gain if self.manual_gain > 0 else 0
+        
         try:
             self.stream = self.p.open(
                 format=FORMAT, channels=1, rate=SAMPLE_RATE,
@@ -112,24 +124,85 @@ class WatchAnalyzer:
                 raw_data = self.data_queue.get(timeout=1)
             except queue.Empty: continue
 
-            # 1. AGC
+            # 1. Pre-filter the raw data to remove low-frequency room noise.
+            # CRITICAL FIX: We MUST subtract the mean (DC offset) of the chunk before filtering.
+            # Without this, the DC offset acts like a massive step-function at the start of
+            # every chunk, causing the bandpass filter to ring and create a false high-frequency
+            # spike, which falsely triggers the AGC to back off to ~50-60!
+            raw_centered = raw_data.astype(np.float32)
+            raw_centered -= np.mean(raw_centered)
+            filtered_raw = signal.lfilter(self.b, self.a, raw_centered)
+
+            # 2. AGC (driven by the filtered signal)
             if self.use_agc:
-                chunk_max = np.max(np.abs(raw_data))
-                if chunk_max > 0:
-                    instant_gain = self.target_peak / chunk_max
-                    # Faster AGC: changed 0.98/0.02 to 0.80/0.20
-                    self.agc_gain = (self.agc_gain * 0.8) + (instant_gain * 0.2)
+                chunk_max = np.max(np.abs(filtered_raw))
+                
+                # Peak Hold with slow decay (~1s half-life)
+                # This prevents the AGC from chasing noise between beats
+                self.peak_hold = max(chunk_max, self.peak_hold * 0.98)
+                
+                if self.peak_hold > 0:
+                    target_gain = self.target_peak / self.peak_hold
+                    
+                    if target_gain < self.agc_gain:
+                        # SIGNAL LOUDER -> REDUCE GAIN (Attack)
+                        # Very fast attack to avoid clipping
+                        alpha = 0.5
+                        self.agc_gain = (self.agc_gain * (1 - alpha)) + (target_gain * alpha)
+                    else:
+                        # SIGNAL QUIETER -> INCREASE GAIN (Decay)
+                        if len(self.intervals) >= 3:
+                            # Locked mode: very stable gain
+                            alpha = 0.002
+                            self.agc_gain = (self.agc_gain * (1 - alpha)) + (target_gain * alpha)
+                        else:
+                            # Search mode: Fast ramp up, avoiding the "0.x increment" crawl
+                            step = (target_gain - self.agc_gain) * 0.1
+                            
+                            # Enforce a minimum step size (e.g. 2% of max gain per chunk)
+                            # This ensures we reach high target gains quickly (max ~2.5s)
+                            min_step = self.max_gain * 0.02 
+                            
+                            if step < min_step:
+                                step = min_step
+                                
+                            if self.agc_gain + step > target_gain:
+                                self.agc_gain = target_gain
+                            else:
+                                self.agc_gain += step
+                            
                     self.agc_gain = max(1.0, min(self.agc_gain, self.max_gain))
             else:
                 self.agc_gain = self.manual_gain
 
-            # 2. Filter & Smooth
-            amplified = raw_data.astype(np.float32) * self.agc_gain
-            filtered = signal.lfilter(self.b, self.a, amplified)
-            envelope = np.abs(filtered)
+            # 3. Amplify & Smooth
+            amplified = filtered_raw * self.agc_gain
+            envelope = np.abs(amplified)
             smoothed = np.convolve(envelope, smooth_win, mode='same')
 
-            # 3. Peak Detection
+            # Track peak of smoothed signal with slow decay
+            chunk_smooth_max = np.max(smoothed)
+            self.smoothed_peak = max(chunk_smooth_max, self.smoothed_peak * 0.99)
+            
+            # Robust noise floor estimator: use 10th percentile to ignore the ticks
+            # and focus on the quietest 10% of the chunk (the room noise floor).
+            chunk_floor = np.percentile(smoothed, 10)
+            
+            # Slow adaptation to the noise floor to ignore transient loud peaks
+            self.noise_floor = (self.noise_floor * 0.98) + (chunk_floor * 0.02)
+
+            # 4. Peak Detection
+            if self.auto_threshold:
+                # Set threshold just above the noise floor. 
+                # 1.5x floor + 1500 (fixed floor) should catch quiet ticks
+                # while staying clear of pure noise.
+                target_thresh = self.noise_floor * 1.5 + 1500.0
+                target_percent = (target_thresh / 32768.0) * 100.0
+                target_percent = max(1.0, min(target_percent, 95.0))
+                
+                # Gently steer the threshold_percent parameter
+                self.threshold_percent = (self.threshold_percent * 0.9) + (target_percent * 0.1)
+                
             current_threshold = (self.threshold_percent / 100.0) * 32768
             
             for i, sample in enumerate(smoothed):
@@ -175,7 +248,7 @@ class WatchAnalyzer:
             self.plot_buffer[-len(downsampled):] = downsampled
             
             if self.data_queue.qsize() < 2:
-                self.results_queue.put(("WAVEFORM", (self.plot_buffer, current_threshold, self.agc_gain)))
+                self.results_queue.put(("WAVEFORM", (self.plot_buffer, current_threshold, self.agc_gain, self.smoothed_peak)))
 
     def _analyze_intervals(self):
         if len(self.session_intervals) < 5: return
@@ -229,7 +302,7 @@ class WatchAnalyzer:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Timegrapher v6 - Final")
+        self.title("Timegrapher v0.7")
         self.geometry("1200x850")
         self.analyzer = WatchAnalyzer()
         self.device_map = self.analyzer.get_input_devices()
@@ -237,10 +310,11 @@ class App(tk.Tk):
         
         # NEW VARIABLES for 60s test
         self.test_timer = None 
-        self.latest_stats = None 
+        self.latest_stats = None
         self.current_agc = 50.0
-        self.be_history = [] # To store (time, instant_be, avg_be)
-        
+        self.dragging_gain = False
+        self.dragging_thresh = False
+        self.be_history = [] # To store (time, instant_be, avg_be)        
         self._build_ui()
         self.update_loop()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -308,30 +382,41 @@ class App(tk.Tk):
         control_frame = ttk.Frame(left_frame, padding=10)
         control_frame.pack(fill=tk.X)
         
+        self.auto_thresh_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(control_frame, text="Auto Thresh", variable=self.auto_thresh_var, command=self._set_auto_thresh).pack(side=tk.LEFT)
+
         self.thresh_var = tk.DoubleVar(value=40.0)
-        ttk.Label(control_frame, text="Threshold:").pack(side=tk.LEFT)
-        ttk.Scale(control_frame, from_=1.0, to=95.0, variable=self.thresh_var, command=self._set_thresh).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        ttk.Label(control_frame, text="Threshold:", padding=(10,0,0,0)).pack(side=tk.LEFT)
+        self.thresh_scale = ttk.Scale(control_frame, from_=1.0, to=95.0, variable=self.thresh_var, command=self._set_thresh)
+        self.thresh_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        
+        self.thresh_scale.bind("<ButtonPress-1>", lambda e: setattr(self, 'dragging_thresh', True))
+        self.thresh_scale.bind("<ButtonRelease-1>", lambda e: setattr(self, 'dragging_thresh', False))
+
         self.lbl_thresh = ttk.Label(control_frame, text="40%")
         self.lbl_thresh.pack(side=tk.LEFT)
 
         gain_frame = ttk.Frame(left_frame, padding=10)
         gain_frame.pack(fill=tk.X)
         
-        self.agc_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(gain_frame, text="Auto AGC", variable=self.agc_var, command=self._set_agc_mode).pack(side=tk.LEFT)
-        
-        ttk.Label(gain_frame, text="Input:").pack(side=tk.LEFT, padx=(15, 5))
+        ttk.Label(gain_frame, text="Input:").pack(side=tk.LEFT, padx=(0, 5))
         self.input_type_var = tk.StringVar(value="Standard Mic")
         self.input_combo = ttk.Combobox(gain_frame, textvariable=self.input_type_var, values=["Standard Mic", "Inductive / Low Signal"], state="readonly", width=18)
         self.input_combo.pack(side=tk.LEFT)
         self.input_combo.bind("<<ComboboxSelected>>", self._on_input_type_change)
+        
+        self.agc_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(gain_frame, text="Auto AGC", variable=self.agc_var, command=self._set_agc_mode).pack(side=tk.LEFT, padx=(15, 0))
 
-        ttk.Label(gain_frame, text="Manual Gain:").pack(side=tk.LEFT, padx=(15, 5))
+        ttk.Label(gain_frame, text="Gain:").pack(side=tk.LEFT, padx=(15, 5))
         self.gain_var = tk.DoubleVar(value=50.0)
-        self.gain_scale = ttk.Scale(gain_frame, from_=1.0, to=300.0, variable=self.gain_var, command=self._set_gain)
+        self.gain_scale = ttk.Scale(gain_frame, from_=1.0, to=500.0, variable=self.gain_var, command=self._set_gain)
         self.gain_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
         
-        self.lbl_agc = ttk.Label(gain_frame, text="AGC: 50.0x", foreground="blue")
+        self.gain_scale.bind("<ButtonPress-1>", lambda e: setattr(self, 'dragging_gain', True))
+        self.gain_scale.bind("<ButtonRelease-1>", lambda e: setattr(self, 'dragging_gain', False))
+        
+        self.lbl_agc = ttk.Label(gain_frame, text="Gain: 50.0x", foreground="blue")
         self.lbl_agc.pack(side=tk.RIGHT, padx=10)
 
         # --- Plot ---
@@ -379,24 +464,43 @@ class App(tk.Tk):
         self.log_box.tag_config("FINAL", foreground="blue", font=("Consolas", 9, "bold"))
 
     def _set_thresh(self, v):
+        if getattr(self, '_is_updating_sliders', False): return
         self.analyzer.threshold_percent = float(v)
-        self.lbl_thresh.config(text=f"{int(float(v))}%")
+        if not self.auto_thresh_var.get():
+            self.lbl_thresh.config(text=f"{int(float(v))}%")
+
+    def _set_auto_thresh(self):
+        self.analyzer.auto_threshold = self.auto_thresh_var.get()
+        if self.analyzer.auto_threshold:
+            self.lbl_thresh.config(foreground="blue")
+        else:
+            self.lbl_thresh.config(foreground="black")
 
     def _set_agc_mode(self):
         self.analyzer.use_agc = self.agc_var.get()
-        if not self.analyzer.use_agc:
+        if self.analyzer.use_agc:
+            self.lbl_agc.config(foreground="blue")
+        else:
+            self.lbl_agc.config(foreground="black")
             # Sync slider to current AGC value when switching to manual
             self.gain_var.set(self.current_agc)
             self.analyzer.manual_gain = self.current_agc
 
     def _set_gain(self, v):
-        self.gain_var.set(float(v))
-        self.analyzer.manual_gain = float(v)
+        if getattr(self, '_is_updating_sliders', False): return
+        gain_val = float(v)
+        self.gain_var.set(gain_val)
+        self.analyzer.manual_gain = gain_val
+        
+        if self.agc_var.get():
+            # If user moves slider while AGC is on, steer AGC to this value
+            self.analyzer.agc_gain = gain_val
+            self.analyzer.peak_hold = self.analyzer.target_peak / gain_val if gain_val > 0 else 0
 
     def _on_input_type_change(self, event=None):
         if self.input_type_var.get() == "Standard Mic":
-            self.analyzer.max_gain = 300.0
-            self.gain_scale.config(to=300.0)
+            self.analyzer.max_gain = 500.0
+            self.gain_scale.config(to=500.0)
         else:
             self.analyzer.max_gain = 5000.0
             self.gain_scale.config(to=5000.0)
@@ -514,12 +618,30 @@ class App(tk.Tk):
                         self.bell() # System beep
                 
                 elif tag == "WAVEFORM":
-                    buf, thresh, agc = data
+                    buf, thresh, agc, smoothed_peak = data
                     self.current_agc = agc
                     self.line.set_data(np.arange(len(buf)), buf)
                     self.tline.set_data([0, len(buf)], [thresh, thresh])
                     self.ax_wave.set_xlim(0, len(buf))
-                    self.lbl_agc.config(text=f"AGC: {agc:.1f}x")
+                    self.ax_wave.set_ylim(0, 32768)
+
+                    self._is_updating_sliders = True
+                    if self.agc_var.get():
+                        self.lbl_agc.config(text=f"Gain: {agc:.1f}x")
+                        if not getattr(self, 'dragging_gain', False):
+                            self.gain_var.set(agc)
+                            self.analyzer.manual_gain = agc # Keep synced for seamless handoff
+                    else:
+                        self.lbl_agc.config(text=f"Gain: {agc:.1f}x")
+
+                    thresh_percent = (thresh / 32768.0) * 100.0
+                    if self.auto_thresh_var.get():
+                        self.lbl_thresh.config(text=f"{int(thresh_percent)}%")
+                        if not getattr(self, 'dragging_thresh', False):
+                            self.thresh_var.set(thresh_percent)
+                    
+                    self._is_updating_sliders = False
+                        
                     self.canvas.draw_idle()
                     
                 elif tag == "LOG":
