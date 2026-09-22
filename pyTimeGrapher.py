@@ -19,12 +19,16 @@ STANDARD_BPH = [3600, 7200, 14400, 18000, 19800, 21600, 25200, 28800, 36000]
 SAMPLE_RATE = 44100
 CHUNK_SIZE = 2048
 FORMAT = pyaudio.paInt16
+APP_VERSION = "0.8"
 
 class WatchAnalyzer:
     def __init__(self):
         self.p = pyaudio.PyAudio()
         self.stream = None
         self.running = False
+        self._stop_event = threading.Event()
+        self._state_lock = threading.RLock()
+        self.process_thread = None
         self.data_queue = queue.Queue()
         self.results_queue = queue.Queue()
         
@@ -44,6 +48,7 @@ class WatchAnalyzer:
         self.last_trigger_index = -999999
         self.total_processed_samples = 0
         self.last_tick_time = 0
+        self.cadence_interval = None
         
         # Data Storage
         self.intervals = []          # Rolling buffer for "Instant" stats (last 10)
@@ -51,20 +56,29 @@ class WatchAnalyzer:
         
         # Filter Setup (2kHz - 10kHz)
         self.b, self.a = signal.butter(4, [2000, 10000], btype='bandpass', fs=SAMPLE_RATE)
+        self._filter_zi = signal.lfilter_zi(self.b, self.a) * 0.0
+        self._dc_offset = None
+        self._envelope_history = np.zeros(int(SAMPLE_RATE * 0.005) - 1, dtype=np.float32)
         self.plot_buffer = np.zeros(SAMPLE_RATE * 2 // 20) 
         
         self.reset_data()
 
     def reset_data(self):
-        self.last_tick_time = 0
-        self.intervals = []
-        self.session_intervals = []
-        self.agc_gain = 50.0
-        self.peak_hold = 0.0
-        self.smoothed_peak = 0.0
-        self.noise_floor = 0.0
-        self.total_processed_samples = 0
-        self.last_trigger_index = -999999
+        with self._state_lock:
+            self.last_tick_time = 0
+            self.cadence_interval = None
+            self.intervals = []
+            self.session_intervals = []
+            self.agc_gain = 50.0
+            self.peak_hold = 0.0
+            self.smoothed_peak = 0.0
+            self.noise_floor = 0.0
+            self.total_processed_samples = 0
+            self.last_trigger_index = -999999
+            self.plot_buffer.fill(0)
+            self._filter_zi = signal.lfilter_zi(self.b, self.a) * 0.0
+            self._dc_offset = None
+            self._envelope_history.fill(0)
         self.results_queue.put(("RESET", None))
         self.results_queue.put(("LOG", "--- Session Reset ---"))
 
@@ -79,8 +93,12 @@ class WatchAnalyzer:
         return devices
 
     def start_stream(self, device_index=None):
-        if self.running: return
+        if self.running: return False
         self.reset_data()
+        while True:
+            try: self.data_queue.get_nowait()
+            except queue.Empty: break
+        self._stop_event.clear()
         self.running = True
         
         # Start AGC at the current manual slider position
@@ -96,30 +114,64 @@ class WatchAnalyzer:
         except Exception as e:
             self.running = False
             self.results_queue.put(("LOG", f"Error opening stream: {e}"))
-            return
+            return False
         
         self.process_thread = threading.Thread(target=self._process_data)
         self.process_thread.daemon = True
         self.process_thread.start()
         self.results_queue.put(("LOG", f"Listening on device {device_index}..."))
+        return True
 
     def stop_stream(self):
         self.running = False
+        self._stop_event.set()
         if self.stream:
             self.stream.stop_stream()
             self.stream.close()
             self.stream = None
+        if self.process_thread and self.process_thread is not threading.current_thread():
+            self.process_thread.join()
+        self.process_thread = None
+        while True:
+            try: self.data_queue.get_nowait()
+            except queue.Empty: break
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         if self.running:
             self.data_queue.put(np.frombuffer(in_data, dtype=np.int16))
         return (None, pyaudio.paContinue)
 
+    def _filter_chunk(self, raw_data):
+        """Filter one audio chunk while preserving filter and DC state."""
+        raw_float = raw_data.astype(np.float32)
+        chunk_mean = float(np.mean(raw_float))
+        if self._dc_offset is None:
+            self._dc_offset = chunk_mean
+        else:
+            self._dc_offset = self._dc_offset * 0.99 + chunk_mean * 0.01
+        raw_centered = raw_float - self._dc_offset
+        filtered_raw, self._filter_zi = signal.lfilter(
+            self.b, self.a, raw_centered, zi=self._filter_zi)
+        return filtered_raw
+
+    def _smooth_envelope(self, envelope, smooth_win):
+        smooth_input = np.concatenate((self._envelope_history, envelope))
+        smoothed = np.convolve(smooth_input, smooth_win, mode='valid')
+        self._envelope_history = smooth_input[-(len(smooth_win) - 1):]
+        return smoothed
+
+    def _classify_interval(self, delta):
+        if delta < 0.09:
+            return "NOISE"
+        if delta > 2.2 or (self.cadence_interval is not None and delta > self.cadence_interval * 1.5):
+            return "MISSED"
+        return "OK"
+
     def _process_data(self):
         window_len = int(SAMPLE_RATE * 0.005) 
         smooth_win = np.ones(window_len) / window_len
 
-        while self.running:
+        while not self._stop_event.is_set():
             try:
                 raw_data = self.data_queue.get(timeout=1)
             except queue.Empty: continue
@@ -129,9 +181,7 @@ class WatchAnalyzer:
             # Without this, the DC offset acts like a massive step-function at the start of
             # every chunk, causing the bandpass filter to ring and create a false high-frequency
             # spike, which falsely triggers the AGC to back off to ~50-60!
-            raw_centered = raw_data.astype(np.float32)
-            raw_centered -= np.mean(raw_centered)
-            filtered_raw = signal.lfilter(self.b, self.a, raw_centered)
+            filtered_raw = self._filter_chunk(raw_data)
 
             # 2. AGC (driven by the filtered signal)
             if self.use_agc:
@@ -176,10 +226,7 @@ class WatchAnalyzer:
                 self.agc_gain = self.manual_gain
 
             # 3. Amplify & Smooth
-            amplified = filtered_raw * self.agc_gain
-            envelope = np.abs(amplified)
-            smoothed = np.convolve(envelope, smooth_win, mode='same')
-
+            smoothed = self._smooth_envelope(np.abs(filtered_raw * self.agc_gain), smooth_win)
             # Track peak of smoothed signal with slow decay
             chunk_smooth_max = np.max(smoothed)
             self.smoothed_peak = max(chunk_smooth_max, self.smoothed_peak * 0.99)
@@ -222,9 +269,7 @@ class WatchAnalyzer:
                     if self.last_tick_time > 0:
                         delta = current_time - self.last_tick_time
                         
-                        status = "OK"
-                        if delta < 0.09: status = "NOISE"
-                        elif delta > 2.2: status = "MISSED"
+                        status = self._classify_interval(delta)
                         
                         self.results_queue.put(("LOG", f"Δ: {delta*1000:.0f}ms -> {status}"))
 
@@ -235,6 +280,8 @@ class WatchAnalyzer:
                         elif status == "OK":
                             self.intervals.append(delta)
                             self.session_intervals.append(delta)
+                            recent = self.intervals[-5:]
+                            self.cadence_interval = float(np.median(recent))
                             if len(self.intervals) > 10: self.intervals.pop(0)
                             self._analyze_intervals()
                     # Only update the "last tick" time if it was a valid tick (or the very first one)
@@ -302,7 +349,7 @@ class WatchAnalyzer:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Timegrapher v0.7")
+        self.title(f"Timegrapher v{APP_VERSION}")
         self.geometry("1200x850")
         self.analyzer = WatchAnalyzer()
         self.device_map = self.analyzer.get_input_devices()
@@ -337,7 +384,7 @@ class App(tk.Tk):
         # NEW BUTTON
         ttk.Button(toolbar, text="60s Test", command=self.start_60s_test).pack(side=tk.LEFT, padx=5)
         
-        ttk.Button(toolbar, text="Reset", command=self.analyzer.reset_data).pack(side=tk.LEFT, padx=5)
+        ttk.Button(toolbar, text="Reset", command=self.reset_session).pack(side=tk.LEFT, padx=5)
         
         ttk.Button(toolbar, text="About", command=self.show_about).pack(side=tk.LEFT, padx=5)
         
@@ -558,6 +605,14 @@ class App(tk.Tk):
                 self.test_timer = None
                 self.log_msg("--- 60s Test Cancelled ---")
 
+    def reset_session(self):
+        if self.test_timer:
+            self.after_cancel(self.test_timer)
+            self.test_timer = None
+            self.log_msg("--- 60s Test Cancelled ---")
+        self.latest_stats = None
+        self.analyzer.reset_data()
+
     # NEW METHODS for 60s test
     def start_60s_test(self):
         if self.test_timer:
@@ -568,7 +623,9 @@ class App(tk.Tk):
         
         if not self.analyzer.running:
             idx = self.device_map.get(self.device_var.get())
-            self.analyzer.start_stream(idx)
+            if not self.analyzer.start_stream(idx):
+                self.log_msg("--- 60s Test could not start ---")
+                return
         else:
             self.analyzer.reset_data()
             
@@ -722,6 +779,7 @@ class App(tk.Tk):
         self.analyzer.stop_stream()
         if self.test_timer:
             self.after_cancel(self.test_timer)
+        self.analyzer.p.terminate()
         self.destroy()
 
 if __name__ == "__main__":

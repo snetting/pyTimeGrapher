@@ -2,6 +2,12 @@
 
 **pyTimeGrapher** is a Python-based acoustic analysis tool designed to act as a software timegrapher for regulating mechanical watches and pendulum clocks. It serves as a free, open-source alternative to dedicated hardware (like the Weishi No. 1000 or Witschi Watch Expert), using your computer's microphone or a contact piezo sensor to measure the heartbeat of a movement.
 
+Current release: **v0.8**
+
+![pyTimeGrapher measuring a movement](docs/pyTimeGrapher.png)
+
+The screenshot shows the live rate, beat error, waveform, trend graph, and real-time detection log while measuring a movement through an inductive/low-signal input.
+
 ## 🚀 Key Features
 
 * **Universal Compatibility:** Works with both fast-beat wristwatches (14,400 to 36,000 bph) and slow-beat pendulum clocks (3,600 to 7,200 bph).
@@ -74,5 +80,4 @@ Pull requests are welcome! We are currently looking for:
 
 * Algorithm improvements for low-amplitude movements.
 * Lift Angle / Amplitude calculation support.
-
 
